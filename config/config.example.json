@@ -1,0 +1,19 @@
+{
+  "port": 8000,
+  "apiEndpoints": [
+    {
+      "id": "mock-ocr",
+      "type": "ocr",
+      "label": "Mock OCR",
+      "url": "mock://ocr",
+      "description": "Local placeholder OCR endpoint for development."
+    },
+    {
+      "id": "mock-llm",
+      "type": "llm",
+      "label": "Mock LLM",
+      "url": "mock://llm",
+      "description": "Local placeholder LLM endpoint for development."
+    }
+  ]
+}

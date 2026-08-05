@@ -1,0 +1,556 @@
+:root {
+  color: hsl(220 9% 29%);
+  background: hsl(48 55% 97%);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --bg: hsl(48 55% 97%);
+  --surface: hsl(48 48% 98%);
+  --line: hsl(215 20% 84%);
+  --text: hsl(220 9% 29%);
+  --muted: hsl(214 10% 48%);
+  --rose: hsl(4 47% 86%);
+  --peach: hsl(24 52% 84%);
+  --sage: hsl(83 38% 84%);
+  --mint: hsl(159 39% 84%);
+  --blue: hsl(228 46% 85%);
+  --accent: hsl(228 45% 64%);
+  --danger: hsl(4 45% 58%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+.button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
+  font: inherit;
+  white-space: nowrap;
+}
+
+button:hover,
+.button:hover {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--blue);
+  border-color: hsl(228 35% 72%);
+  color: hsl(220 18% 24%);
+}
+
+.danger {
+  border-color: hsl(4 38% 78%);
+  color: var(--danger);
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--text);
+  font: inherit;
+  min-height: 36px;
+  padding: 8px 10px;
+}
+
+textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 26px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+h3 {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.appShell {
+  min-height: 100vh;
+}
+
+.topbar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 92%, white);
+}
+
+.brand {
+  font-weight: 720;
+  letter-spacing: 0;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.page {
+  padding: 22px;
+}
+
+.pageTitle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.pageTitle p {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.workflowGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.workflowCard {
+  min-height: 168px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 16px;
+  display: grid;
+  align-content: space-between;
+  gap: 16px;
+}
+
+.workflowCard h2 {
+  margin-bottom: 8px;
+}
+
+.workflowCard p,
+.meta,
+.empty,
+.status {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.notice {
+  border: 1px solid hsl(4 40% 78%);
+  background: hsl(4 55% 94%);
+  color: hsl(4 40% 34%);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.editor {
+  height: calc(100vh - 56px);
+  display: grid;
+  grid-template-columns: 240px minmax(520px, 1fr) 330px;
+  overflow: hidden;
+}
+
+.palette,
+.inspector {
+  border-right: 1px solid var(--line);
+  background: hsl(48 45% 98%);
+  padding: 14px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.inspector {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.palette h2 {
+  margin-bottom: 2px;
+}
+
+.divider {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 0;
+}
+
+.canvas,
+.debugCanvas {
+  position: relative;
+  overflow: auto;
+  min-height: 580px;
+  background:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px),
+    var(--bg);
+  background-size: 28px 28px;
+}
+
+.canvas {
+  height: 100%;
+}
+
+.edges {
+  position: absolute;
+  inset: 0;
+  width: 1800px;
+  height: 1100px;
+  pointer-events: none;
+}
+
+.edges g {
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.edgePath {
+  fill: none;
+  stroke: hsl(214 24% 62%);
+  stroke-width: 3;
+}
+
+.edges g:hover .edgePath {
+  stroke: var(--accent);
+  stroke-width: 5;
+}
+
+.flowNode {
+  position: absolute;
+  width: 236px;
+  min-height: 124px;
+  border: 1px solid hsl(214 24% 78%);
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 10px 24px hsl(220 20% 35% / 0.08);
+  user-select: none;
+  overflow: hidden;
+}
+
+.flowNode.selected {
+  outline: 3px solid hsl(228 50% 78%);
+}
+
+.flowNode.input .nodeHead {
+  background: var(--mint);
+}
+
+.flowNode.ocr .nodeHead {
+  background: var(--sage);
+}
+
+.flowNode.llm .nodeHead {
+  background: var(--blue);
+}
+
+.flowNode.python .nodeHead {
+  background: var(--peach);
+}
+
+.flowNode.output .nodeHead {
+  background: var(--rose);
+}
+
+.nodeHead {
+  height: 48px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid hsl(214 22% 82%);
+}
+
+.nodeHead span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.nodeHead small {
+  color: hsl(220 10% 38%);
+}
+
+.portRows {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 14px 10px 12px;
+}
+
+.portRows > div {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.port {
+  width: 100%;
+  min-height: 24px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.outputPort {
+  justify-content: flex-end;
+}
+
+.port span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: white;
+  flex: 0 0 auto;
+}
+
+.outputPort.active span {
+  background: var(--accent);
+}
+
+.panel {
+  display: grid;
+  gap: 12px;
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.code {
+  font-family: "Cascadia Code", Consolas, monospace;
+  min-height: 130px;
+}
+
+.code.tall {
+  min-height: 210px;
+}
+
+.fieldEditor {
+  display: grid;
+  gap: 8px;
+}
+
+.fieldRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr 86px;
+  gap: 6px;
+}
+
+.fieldRow button {
+  grid-column: 1 / -1;
+}
+
+.portSummary {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.edgeChip {
+  width: 100%;
+  justify-content: flex-start;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.runLayout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(320px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.runForm,
+.resultPane,
+.edgeData,
+.history {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.inputGroup {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid hsl(215 18% 88%);
+  border-radius: 8px;
+  background: white;
+}
+
+.htmlPreview {
+  width: 100%;
+  min-height: 300px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.debugPane {
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) 330px;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.debugCanvas {
+  height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.edgeData pre,
+.resultPane pre {
+  min-height: 220px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.history {
+  margin-top: 16px;
+}
+
+.historyRow {
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid hsl(215 18% 88%);
+  border-radius: 8px;
+  background: white;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 980px) {
+  .editor {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .palette,
+  .inspector {
+    border: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .canvas {
+    height: 620px;
+    order: 2;
+  }
+
+  .inspector {
+    order: 3;
+  }
+
+  .runLayout,
+  .debugPane {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .topbar,
+  .pageTitle {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .topbar {
+    height: auto;
+    padding: 12px 16px;
+  }
+
+  .page {
+    padding: 16px;
+  }
+
+  .workflowGrid {
+    grid-template-columns: 1fr;
+  }
+}

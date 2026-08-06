@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import os
+import ssl
 import traceback
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = Path(os.environ.get("AI_WORKFLOW_CONFIG", PROJECT_ROOT / "config" / "config.json"))
-DATA_DIR = Path(os.environ.get("AI_WORKFLOW_DATA_DIR", "/data/ai-workflow"))
+DATA_DIR = Path(os.environ.get("AI_WORKFLOW_DATA_DIR", "data"))
 FRONTEND_DIST_DIR = Path(os.environ.get("AI_WORKFLOW_FRONTEND_DIST", PROJECT_ROOT / "frontend" / "dist"))
 WORKFLOWS_DIR = DATA_DIR / "workflows"
 RUNS_DIR = DATA_DIR / "runs"
@@ -163,12 +165,12 @@ def endpoint_by_id(endpoint_id: str | None, endpoint_type: str) -> dict[str, Any
     return typed[0] if typed else None
 
 
-def endpoint_headers(endpoint: dict[str, Any]) -> dict[str, str]:
+def endpoint_headers(endpoint: dict[str, Any], default_auth_scheme: str = "Bearer") -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     api_key = endpoint.get("apiKey")
     if api_key:
         header_name = endpoint.get("authHeader", "Authorization")
-        auth_scheme = endpoint.get("authScheme", "Bearer")
+        auth_scheme = endpoint.get("authScheme", default_auth_scheme)
         headers[header_name] = f"{auth_scheme} {api_key}".strip() if auth_scheme else str(api_key)
     for key, value in endpoint.get("headers", {}).items():
         headers[str(key)] = str(value)
@@ -205,6 +207,28 @@ def call_json_endpoint(endpoint: dict[str, Any], payload: dict[str, Any]) -> dic
     return json.loads(raw) if raw else {}
 
 
+def call_paddleocr_endpoint(endpoint: dict[str, Any], file_data: str) -> dict[str, Any]:
+    url = endpoint.get("url", "")
+    headers = endpoint_headers(endpoint, default_auth_scheme="token")
+    payload = {
+        "file": file_data,
+        "fileType": 1,
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useTextlineOrientation": False,
+        "useChartRecognition": False,
+    }
+    request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    context = ssl._create_unverified_context()
+    try:
+        with urlopen(request, timeout=300, context=context) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ValueError(f"OCR API request failed with status {exc.code}: {body}") from exc
+    return json.loads(raw) if raw else {}
+
+
 def extract_deepseek_text(response: Any) -> str | dict[str, Any]:
     if isinstance(response, dict):
         choices = response.get("choices")
@@ -220,13 +244,60 @@ def extract_deepseek_text(response: Any) -> str | dict[str, Any]:
     return response
 
 
-def extract_paddleocr_results(response: Any) -> list[Any] | Any:
+def extract_paddleocr_texts(response: Any) -> tuple[list[str], Any]:
     if isinstance(response, dict):
-        for key in ("ocrResultList", "results", "data", "result"):
-            if response.get(key) is not None:
-                value = response[key]
-                return value if isinstance(value, list) else [value]
-    return response if isinstance(response, list) else [response]
+        result = response.get("result")
+        if isinstance(result, dict):
+            texts = []
+            layout_results = result.get("layoutParsingResults")
+            if isinstance(layout_results, list):
+                for item in layout_results:
+                    if not isinstance(item, dict):
+                        continue
+                    markdown = item.get("markdown")
+                    if isinstance(markdown, dict):
+                        text = markdown.get("text")
+                        if text:
+                            texts.append(str(text))
+            return texts, result
+        return [], result
+    return [], response
+
+
+def image_to_base64(image: Any) -> str | None:
+    if isinstance(image, dict):
+        for key in ("dataUrl", "dataURL", "base64", "file", "content"):
+            value = image.get(key)
+            if isinstance(value, str) and value:
+                image = value
+                break
+        else:
+            for key in ("path", "filePath"):
+                value = image.get(key)
+                if isinstance(value, str) and value:
+                    path = Path(value)
+                    if path.is_file():
+                        return base64.b64encode(path.read_bytes()).decode("ascii")
+            return None
+    if isinstance(image, str):
+        if image.startswith("data:") and "," in image:
+            return image.split(",", 1)[1]
+        path = Path(image)
+        if path.is_file():
+            return base64.b64encode(path.read_bytes()).decode("ascii")
+        return image
+    return None
+
+
+def resolve_ocr_images(inputs: dict[str, Any]) -> list[Any]:
+    candidates = inputs.get("imageList")
+    if candidates is None:
+        candidates = inputs.get("images")
+    if candidates is None:
+        form = inputs.get("form")
+        if isinstance(form, dict):
+            candidates = form.get("imageList") or form.get("images")
+    return as_list(candidates)
 
 
 def execute_input_node(node: dict[str, Any], run_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -238,23 +309,30 @@ def execute_input_node(node: dict[str, Any], run_inputs: dict[str, Any]) -> dict
         name = field.get("name")
         if name:
             values[name] = submitted.get(name)
-    values["form"] = values
+    values["form"] = dict(values)
     return values
 
 
 def execute_ocr_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
     endpoint = endpoint_by_id(node.get("config", {}).get("endpointId"), "ocr")
-    images = as_list(inputs.get("imageList") or inputs.get("images") or inputs.get("form"))
+    images = resolve_ocr_images(inputs)
     if endpoint and not endpoint.get("url", "").startswith("mock://"):
-        provider = endpoint.get("provider") or "paddleocr"
-        payload = {
-            "images": images,
-            "imageList": images,
-            "config": node.get("config", {}),
-            "provider": provider,
-        }
-        response = call_json_endpoint(endpoint, payload)
-        return {"ocrResultList": extract_paddleocr_results(response)}
+        ocr_texts = []
+        raw_results = []
+        for image in images:
+            file_data = image_to_base64(image)
+            if not file_data:
+                raise ValueError("OCR node received an image without file data")
+            response = call_paddleocr_endpoint(endpoint, file_data)
+            texts, raw_result = extract_paddleocr_texts(response)
+            ocr_texts.append("\n\n".join(texts))
+            raw_results.append(raw_result)
+        output: dict[str, Any] = {"ocrResultList": ocr_texts}
+        if ocr_texts:
+            output["textContent"] = "\n\n".join(text for text in ocr_texts if text)
+        if raw_results:
+            output["rawResult"] = raw_results[0] if len(raw_results) == 1 else raw_results
+        return output
     results = []
     for index, image in enumerate(images):
         label = image.get("name") if isinstance(image, dict) else image

@@ -111,6 +111,37 @@ The frontend receives `id`, `type`, `provider`, `label`, and `description` from 
 }
 ```
 
+## Node Port Rules
+
+- `Python Function`
+  - `inputPorts` is edited as a list in the UI and defines the keyword arguments passed into `process(...)`.
+  - `outputPorts` is edited as a list in the UI and defines the names you can expose downstream.
+  - Your function should return a dictionary, and each key is treated as a named output port.
+  - Example:
+
+```python
+def process(title, textList):
+    return {
+        "summary": f"{title}: {textList}",
+        "raw": textList
+    }
+```
+
+- `LLM Prompt`
+  - `inputPorts` is edited as a list in the UI.
+  - `template` is rendered with `{{portName}}` placeholders.
+  - Any incoming value attached to that port can be inserted into the prompt.
+  - Example:
+
+```text
+Use these OCR results:
+{{textList}}
+
+Return a concise answer.
+```
+
+  - Inserted values are converted with `str(...)` before replacement.
+
 ## API
 
 - `GET /api/config/catalog`

@@ -39,7 +39,7 @@ DEFAULT_ENDPOINTS = [
         "label": "DeepSeek",
         "description": "DeepSeek chat completions endpoint.",
         "url": "https://api.deepseek.com/v1/chat/completions",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "apiKey": "",
     },
 ]
@@ -202,7 +202,7 @@ def call_json_endpoint(endpoint: dict[str, Any], payload: dict[str, Any]) -> dic
         return {"mock": True, "payload": payload}
     headers = endpoint_headers(endpoint)
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-    with urlopen(request, timeout=60) as response:
+    with urlopen(request, timeout=600) as response:
         raw = response.read().decode("utf-8")
     return json.loads(raw) if raw else {}
 
@@ -344,7 +344,9 @@ def execute_llm_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
     config = node.get("config", {})
     endpoint = endpoint_by_id(config.get("endpointId"), "llm")
     template = config.get("template", "Summarize:\n{{textList}}")
-    prompt_values = dict(inputs)
+    input_ports = config.get("inputPorts") or ["textList"]
+    prompt_values = {port: inputs.get(port, "") for port in input_ports}
+    prompt_values.update(inputs)
     if "textList" not in prompt_values:
         prompt_values["textList"] = inputs.get("ocrResultList") or inputs.get("content") or ""
     prompt = render_template(template, prompt_values)
@@ -369,6 +371,8 @@ def execute_python_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[st
     config = node.get("config", {})
     script = config.get("script", "def process(**kwargs):\n    return kwargs\n")
     function_name = config.get("functionName", "process")
+    input_ports = config.get("inputPorts") or []
+    call_inputs = {port: inputs.get(port) for port in input_ports} if input_ports else dict(inputs)
     namespace: dict[str, Any] = {
         "__builtins__": {
             "len": len,
@@ -388,7 +392,7 @@ def execute_python_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[st
     exec(script, namespace)
     if function_name not in namespace:
         raise ValueError(f"Function {function_name} was not defined")
-    result = namespace[function_name](**inputs)
+    result = namespace[function_name](**call_inputs)
     return result if isinstance(result, dict) else {"result": result}
 
 

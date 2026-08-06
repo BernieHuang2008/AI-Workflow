@@ -116,6 +116,24 @@ h3 {
   color: var(--muted);
 }
 
+.helperText {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  display: grid;
+  gap: 6px;
+}
+
+.helperText code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  background: hsl(48 40% 95%);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+  white-space: pre-wrap;
+}
+
 pre {
   margin: 0;
   overflow: auto;
@@ -419,6 +437,12 @@ pre {
 
 .fieldRow button {
   grid-column: 1 / -1;
+}
+
+.portRow {
+  display: grid;
+  grid-template-columns: 1fr 86px;
+  gap: 6px;
 }
 
 .portSummary {

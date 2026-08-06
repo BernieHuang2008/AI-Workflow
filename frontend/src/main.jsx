@@ -44,7 +44,12 @@ function createNode(type, position) {
   const config = {
     input: { fields: baseFields },
     ocr: { endpointId: "paddleocr" },
-    llm: { endpointId: "deepseek", model: "deepseek-chat", template: "Use these OCR results:\n{{textList}}\n\nReturn a concise answer." },
+    llm: {
+      endpointId: "deepseek",
+      model: "deepseek-chat",
+      inputPorts: ["textList"],
+      template: "Use these OCR results:\n{{textList}}\n\nReturn a concise answer."
+    },
     python: {
       functionName: "process",
       inputPorts: ["value"],
@@ -67,7 +72,12 @@ function portsFor(node) {
     return { inputs: [], outputs: [...fields.map((field) => field.name), "form"].filter(Boolean) };
   }
   if (node.type === "ocr") return { inputs: ["imageList"], outputs: ["ocrResultList"] };
-  if (node.type === "llm") return { inputs: ["textList"], outputs: ["response", "text", "prompt"] };
+  if (node.type === "llm") {
+    return {
+      inputs: node.config?.inputPorts || ["textList"],
+      outputs: ["response", "text", "prompt"]
+    };
+  }
   if (node.type === "python") {
     return {
       inputs: node.config?.inputPorts || ["value"],
@@ -414,6 +424,12 @@ function Inspector({ node, catalog, onChange, onRemove, edges, onRemoveEdge }) {
       {node.type === "input" && <InputFieldsEditor fields={config.fields || []} onChange={(fields) => patchConfig({ fields })} />}
       {node.type === "llm" && (
         <>
+          <PortListEditor
+            title="Input ports"
+            ports={config.inputPorts || ["textList"]}
+            defaultItem="textList"
+            onChange={(inputPorts) => patchConfig({ inputPorts })}
+          />
           <label>
             Model
             <input value={config.model || ""} onChange={(event) => patchConfig({ model: event.target.value })} />
@@ -422,18 +438,27 @@ function Inspector({ node, catalog, onChange, onRemove, edges, onRemoveEdge }) {
             Prompt template
             <textarea className="code" value={config.template || ""} onChange={(event) => patchConfig({ template: event.target.value })} />
           </label>
+          <div className="helperText">
+            Use <code>{'{{portName}}'}</code> to insert incoming values from any input port.
+            Example: <code>{'Combine {{topic}} and {{textList}} into one answer.'}</code>
+            Inserted values are stringified with <code>str(...)</code> before template rendering.
+          </div>
         </>
       )}
       {node.type === "python" && (
         <>
-          <label>
-            Input ports
-            <input value={(config.inputPorts || []).join(", ")} onChange={(event) => patchConfig({ inputPorts: csv(event.target.value) })} />
-          </label>
-          <label>
-            Output ports
-            <input value={(config.outputPorts || []).join(", ")} onChange={(event) => patchConfig({ outputPorts: csv(event.target.value) })} />
-          </label>
+          <PortListEditor
+            title="Input ports"
+            ports={config.inputPorts || ["value"]}
+            defaultItem="value"
+            onChange={(inputPorts) => patchConfig({ inputPorts })}
+          />
+          <PortListEditor
+            title="Output ports"
+            ports={config.outputPorts || ["result"]}
+            defaultItem="result"
+            onChange={(outputPorts) => patchConfig({ outputPorts })}
+          />
           <label>
             Function name
             <input value={config.functionName || "process"} onChange={(event) => patchConfig({ functionName: event.target.value })} />
@@ -442,6 +467,10 @@ function Inspector({ node, catalog, onChange, onRemove, edges, onRemoveEdge }) {
             Script
             <textarea className="code tall" value={config.script || ""} onChange={(event) => patchConfig({ script: event.target.value })} />
           </label>
+          <div className="helperText">
+            Input ports are passed to <code>process(...)</code> as keyword arguments. Return a dictionary whose keys match the output port names.
+            Example: <code>{'def process(title, textList): return {"summary": f"{title}: {textList}"}'}</code>
+          </div>
         </>
       )}
       {node.type === "output" && (
@@ -470,8 +499,25 @@ function Inspector({ node, catalog, onChange, onRemove, edges, onRemoveEdge }) {
   );
 }
 
-function csv(value) {
-  return value.split(",").map((part) => part.trim()).filter(Boolean);
+function PortListEditor({ title, ports, onChange, defaultItem }) {
+  function update(index, nextValue) {
+    onChange(ports.map((port, itemIndex) => (itemIndex === index ? nextValue : port)));
+  }
+
+  return (
+    <div className="fieldEditor">
+      <h3>{title}</h3>
+      {ports.map((port, index) => (
+        <div className="portRow" key={`${title}-${port}-${index}`}>
+          <input value={port} placeholder="port name" onChange={(event) => update(index, event.target.value)} />
+          <button type="button" onClick={() => onChange(ports.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
+        </div>
+      ))}
+      <button type="button" onClick={() => onChange([...ports, defaultItem])}>
+        Add port
+      </button>
+    </div>
+  );
 }
 
 function InputFieldsEditor({ fields, onChange }) {

@@ -18,6 +18,27 @@ CONFIG_PATH = Path(os.environ.get("AI_WORKFLOW_CONFIG", ROOT / "config" / "confi
 DATA_DIR = Path(os.environ.get("AI_WORKFLOW_DATA_DIR", "/data/ai-workflow"))
 WORKFLOWS_DIR = DATA_DIR / "workflows"
 RUNS_DIR = DATA_DIR / "runs"
+DEFAULT_ENDPOINTS = [
+    {
+        "id": "paddleocr",
+        "type": "ocr",
+        "provider": "paddleocr",
+        "label": "PaddleOCR",
+        "description": "PaddleOCR layout parsing endpoint.",
+        "url": "https://c8s16af3r0gd36g6.aistudio-app.com/layout-parsing",
+        "apiKey": "",
+    },
+    {
+        "id": "deepseek",
+        "type": "llm",
+        "provider": "deepseek",
+        "label": "DeepSeek",
+        "description": "DeepSeek chat completions endpoint.",
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-chat",
+        "apiKey": "",
+    },
+]
 
 
 def now_iso() -> str:
@@ -27,10 +48,7 @@ def now_iso() -> str:
 def load_config() -> dict[str, Any]:
     fallback = {
         "port": 8000,
-        "apiEndpoints": [
-            {"id": "mock-ocr", "type": "ocr", "label": "Mock OCR", "url": "mock://ocr"},
-            {"id": "mock-llm", "type": "llm", "label": "Mock LLM", "url": "mock://llm"},
-        ],
+        "apiEndpoints": DEFAULT_ENDPOINTS,
     }
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("r", encoding="utf-8") as handle:
@@ -54,6 +72,7 @@ def public_catalog() -> dict[str, Any]:
             {
                 "id": item.get("id"),
                 "type": item.get("type"),
+                "provider": item.get("provider"),
                 "label": item.get("label", item.get("id")),
                 "description": item.get("description", ""),
             }
@@ -142,6 +161,18 @@ def endpoint_by_id(endpoint_id: str | None, endpoint_type: str) -> dict[str, Any
     return typed[0] if typed else None
 
 
+def endpoint_headers(endpoint: dict[str, Any]) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    api_key = endpoint.get("apiKey")
+    if api_key:
+        header_name = endpoint.get("authHeader", "Authorization")
+        auth_scheme = endpoint.get("authScheme", "Bearer")
+        headers[header_name] = f"{auth_scheme} {api_key}".strip() if auth_scheme else str(api_key)
+    for key, value in endpoint.get("headers", {}).items():
+        headers[str(key)] = str(value)
+    return headers
+
+
 def as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -165,14 +196,35 @@ def call_json_endpoint(endpoint: dict[str, Any], payload: dict[str, Any]) -> dic
     url = endpoint.get("url", "")
     if url.startswith("mock://"):
         return {"mock": True, "payload": payload}
-    headers = {"Content-Type": "application/json"}
-    api_key_env = endpoint.get("apiKeyEnv")
-    if api_key_env and os.environ.get(api_key_env):
-        headers["Authorization"] = f"Bearer {os.environ[api_key_env]}"
+    headers = endpoint_headers(endpoint)
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     with urlopen(request, timeout=60) as response:
         raw = response.read().decode("utf-8")
     return json.loads(raw) if raw else {}
+
+
+def extract_deepseek_text(response: Any) -> str | dict[str, Any]:
+    if isinstance(response, dict):
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0] or {}
+            message = first.get("message") or {}
+            content = message.get("content")
+            if content is not None:
+                return content
+        for key in ("output_text", "text", "response", "content"):
+            if response.get(key) is not None:
+                return response[key]
+    return response
+
+
+def extract_paddleocr_results(response: Any) -> list[Any] | Any:
+    if isinstance(response, dict):
+        for key in ("ocrResultList", "results", "data", "result"):
+            if response.get(key) is not None:
+                value = response[key]
+                return value if isinstance(value, list) else [value]
+    return response if isinstance(response, list) else [response]
 
 
 def execute_input_node(node: dict[str, Any], run_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -192,8 +244,15 @@ def execute_ocr_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
     endpoint = endpoint_by_id(node.get("config", {}).get("endpointId"), "ocr")
     images = as_list(inputs.get("imageList") or inputs.get("images") or inputs.get("form"))
     if endpoint and not endpoint.get("url", "").startswith("mock://"):
-        response = call_json_endpoint(endpoint, {"images": images, "config": node.get("config", {})})
-        return {"ocrResultList": response.get("ocrResultList", response.get("results", response))}
+        provider = endpoint.get("provider") or "paddleocr"
+        payload = {
+            "images": images,
+            "imageList": images,
+            "config": node.get("config", {}),
+            "provider": provider,
+        }
+        response = call_json_endpoint(endpoint, payload)
+        return {"ocrResultList": extract_paddleocr_results(response)}
     results = []
     for index, image in enumerate(images):
         label = image.get("name") if isinstance(image, dict) else image
@@ -210,8 +269,17 @@ def execute_llm_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
         prompt_values["textList"] = inputs.get("ocrResultList") or inputs.get("content") or ""
     prompt = render_template(template, prompt_values)
     if endpoint and not endpoint.get("url", "").startswith("mock://"):
-        response = call_json_endpoint(endpoint, {"prompt": prompt, "model": config.get("model"), "config": config})
-        text = response.get("text") or response.get("response") or response.get("content") or response
+        provider = endpoint.get("provider") or "deepseek"
+        if provider == "deepseek":
+            payload = {
+                "model": config.get("model") or endpoint.get("model") or "deepseek-chat",
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            }
+        else:
+            payload = {"prompt": prompt, "model": config.get("model"), "config": config}
+        response = call_json_endpoint(endpoint, payload)
+        text = extract_deepseek_text(response)
         return {"response": text, "prompt": prompt}
     text = f"Mock LLM response for prompt:\n{prompt}"
     return {"response": text, "text": text, "prompt": prompt}

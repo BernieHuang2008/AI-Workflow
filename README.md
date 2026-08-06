@@ -6,7 +6,7 @@ Internal AI workflow builder and runner.
 
 - React flowchart editor with draggable nodes and clickable input/output ports.
 - Node types: form input, OCR, LLM prompt, Python function, and workflow output.
-- API endpoint selection uses public endpoint IDs only. API keys stay in backend configuration or environment variables.
+- API endpoint selection uses public endpoint IDs only. API keys are written directly in `config.json`.
 - Runner page submits form input, displays the final product, offers a download, and can expand an in-memory debug trace.
 - Workflow definitions and run input/output records are persisted under `/data/ai-workflow`.
 - Intermediate node and edge values are returned with the current HTTP response and are not persisted.
@@ -47,24 +47,27 @@ Docker Compose maps persistent data to the host path:
   "port": 8000,
   "apiEndpoints": [
     {
-      "id": "internal-ocr",
+      "id": "paddleocr",
       "type": "ocr",
-      "label": "Internal OCR",
-      "url": "http://ocr-service:9000/ocr",
-      "apiKeyEnv": "OCR_API_KEY"
+      "provider": "paddleocr",
+      "label": "PaddleOCR",
+      "url": "https://c8s16af3r0gd36g6.aistudio-app.com/layout-parsing",
+      "apiKey": "YOUR_PADDLEOCR_TOKEN"
     },
     {
-      "id": "internal-llm",
+      "id": "deepseek",
       "type": "llm",
-      "label": "Internal LLM",
-      "url": "http://llm-gateway:9001/generate",
-      "apiKeyEnv": "LLM_API_KEY"
+      "provider": "deepseek",
+      "label": "DeepSeek",
+      "url": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-chat",
+      "apiKey": "YOUR_DEEPSEEK_API_KEY"
     }
   ]
 }
 ```
 
-The frontend receives only `id`, `type`, `label`, and `description` from `/api/config/catalog`.
+The frontend receives `id`, `type`, `provider`, `label`, and `description` from `/api/config/catalog`.
 
 ## Workflow JSON Shape
 

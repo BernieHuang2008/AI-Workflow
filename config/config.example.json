@@ -2,18 +2,33 @@
   "port": 8000,
   "apiEndpoints": [
     {
-      "id": "mock-ocr",
+      "id": "paddleocr",
       "type": "ocr",
-      "label": "Mock OCR",
-      "url": "mock://ocr",
-      "description": "Local placeholder OCR endpoint for development."
+      "provider": "paddleocr",
+      "label": "PaddleOCR",
+      "description": "PaddleOCR layout parsing endpoint.",
+      "url": "https://c8s16af3r0gd36g6.aistudio-app.com/layout-parsing",
+      "apiKey": "YOUR_PADDLEOCR_TOKEN"
     },
     {
-      "id": "mock-llm",
+      "id": "deepseek-v4-flash",
       "type": "llm",
-      "label": "Mock LLM",
-      "url": "mock://llm",
-      "description": "Local placeholder LLM endpoint for development."
+      "provider": "deepseek",
+      "label": "DeepSeek",
+      "description": "DeepSeek chat completions endpoint.",
+      "url": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-v4-flash",
+      "apiKey": "YOUR_DEEPSEEK_API_KEY"
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "type": "llm",
+      "provider": "deepseek",
+      "label": "DeepSeek",
+      "description": "DeepSeek chat completions endpoint.",
+      "url": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-v4-pro",
+      "apiKey": "YOUR_DEEPSEEK_API_KEY"
     }
   ]
 }

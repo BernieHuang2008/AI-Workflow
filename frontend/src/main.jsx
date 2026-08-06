@@ -22,7 +22,7 @@ function defaultWorkflow() {
   const output = createNode("output", { x: 1010, y: 120 });
   return {
     name: "New AI Workflow",
-    description: "Form input, OCR, LLM prompt and final output.",
+    description: "Form input, PaddleOCR, DeepSeek prompt and final output.",
     nodes: [input, ocr, llm, output],
     edges: [
       connect(input.id, "images", ocr.id, "imageList"),
@@ -43,8 +43,8 @@ function createNode(type, position) {
   };
   const config = {
     input: { fields: baseFields },
-    ocr: { endpointId: "mock-ocr" },
-    llm: { endpointId: "mock-llm", model: "default", template: "Use these OCR results:\n{{textList}}\n\nReturn a concise answer." },
+    ocr: { endpointId: "paddleocr" },
+    llm: { endpointId: "deepseek", model: "deepseek-chat", template: "Use these OCR results:\n{{textList}}\n\nReturn a concise answer." },
     python: {
       functionName: "process",
       inputPorts: ["value"],

@@ -65,6 +65,12 @@ button:disabled {
   color: hsl(220 18% 24%);
 }
 
+.primary.success {
+  background: hsl(137 40% 81%);
+  border-color: hsl(137 30% 58%);
+  color: hsl(137 35% 24%);
+}
+
 .danger {
   border-color: hsl(4 38% 78%);
   color: var(--danger);
@@ -443,6 +449,22 @@ pre {
   display: grid;
   grid-template-columns: 1fr 86px;
   gap: 6px;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid hsl(48 86% 60%);
+  border-top-color: transparent;
+  animation: spin 0.8s linear infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .portSummary {

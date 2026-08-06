@@ -183,6 +183,7 @@ function Editor({ workflowId }) {
   const [connecting, setConnecting] = useState(null);
   const [drag, setDrag] = useState(null);
   const [status, setStatus] = useState("");
+  const [saveState, setSaveState] = useState("idle");
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -191,18 +192,25 @@ function Editor({ workflowId }) {
       api(`/api/workflows/${workflowId}`).then((loaded) => {
         setWorkflow(loaded);
         setSelectedId(loaded.nodes?.[0]?.id || null);
+        setSaveState("idle");
       }).catch((err) => setStatus(err.message));
     } else {
       const fresh = defaultWorkflow();
       setWorkflow(fresh);
       setSelectedId(fresh.nodes[0].id);
+      setSaveState("idle");
     }
   }, [workflowId]);
 
   const selected = workflow?.nodes.find((node) => node.id === selectedId);
 
+  function markDirty() {
+    setSaveState("dirty");
+  }
+
   function updateWorkflow(patch) {
     setWorkflow((current) => ({ ...current, ...patch }));
+    markDirty();
   }
 
   function updateNode(nodeId, updater) {
@@ -210,12 +218,14 @@ function Editor({ workflowId }) {
       ...current,
       nodes: current.nodes.map((node) => (node.id === nodeId ? updater(node) : node))
     }));
+    markDirty();
   }
 
   function addNode(type) {
     const node = createNode(type, { x: 160 + workflow.nodes.length * 35, y: 140 + workflow.nodes.length * 22 });
     setWorkflow((current) => ({ ...current, nodes: [...current.nodes, node] }));
     setSelectedId(node.id);
+    markDirty();
   }
 
   function removeNode(nodeId) {
@@ -225,6 +235,7 @@ function Editor({ workflowId }) {
       edges: current.edges.filter((edge) => edge.from.nodeId !== nodeId && edge.to.nodeId !== nodeId)
     }));
     setSelectedId(null);
+    markDirty();
   }
 
   function onPortClick(nodeId, port, direction) {
@@ -265,12 +276,19 @@ function Editor({ workflowId }) {
   }
 
   async function save() {
+    setSaveState("saving");
     const method = workflow.id ? "PUT" : "POST";
     const path = workflow.id ? `/api/workflows/${workflow.id}` : "/api/workflows";
-    const saved = await api(path, { method, body: JSON.stringify(workflow) });
-    setWorkflow(saved);
-    setStatus("Saved");
-    if (!workflow.id) window.location.hash = `#/edit/${saved.id}`;
+    try {
+      const saved = await api(path, { method, body: JSON.stringify(workflow) });
+      setWorkflow(saved);
+      setSaveState("saved");
+      setStatus("Saved");
+      if (!workflow.id) window.location.hash = `#/edit/${saved.id}`;
+    } catch (err) {
+      setSaveState("dirty");
+      setStatus(err.message);
+    }
   }
 
   if (!workflow) return <main className="page">Loading...</main>;
@@ -291,7 +309,9 @@ function Editor({ workflowId }) {
           Description
           <textarea value={workflow.description || ""} onChange={(event) => updateWorkflow({ description: event.target.value })} />
         </label>
-        <button className="primary" onClick={save}>Save</button>
+        <button className={`primary ${saveState === "saved" ? "success" : ""}`} onClick={save}>
+          {saveState === "saving" ? "Saving..." : "Save"}
+        </button>
         {workflow.id && <a className="button" href={`#/run/${workflow.id}`}>Run</a>}
         {status && <div className="status">{status}</div>}
       </aside>
@@ -508,7 +528,7 @@ function PortListEditor({ title, ports, onChange, defaultItem }) {
     <div className="fieldEditor">
       <h3>{title}</h3>
       {ports.map((port, index) => (
-        <div className="portRow" key={`${title}-${port}-${index}`}>
+        <div className="portRow" key={index}>
           <input value={port} placeholder="port name" onChange={(event) => update(index, event.target.value)} />
           <button type="button" onClick={() => onChange(ports.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
         </div>
@@ -528,7 +548,7 @@ function InputFieldsEditor({ fields, onChange }) {
     <div className="fieldEditor">
       <h3>Form fields</h3>
       {fields.map((field, index) => (
-        <div className="fieldRow" key={`${field.name}-${index}`}>
+        <div className="fieldRow" key={index}>
           <input value={field.name} placeholder="name" onChange={(event) => update(index, { name: event.target.value })} />
           <input value={field.label || ""} placeholder="label" onChange={(event) => update(index, { label: event.target.value })} />
           <select value={field.type || "text"} onChange={(event) => update(index, { type: event.target.value })}>
@@ -537,10 +557,10 @@ function InputFieldsEditor({ fields, onChange }) {
             <option value="number">number</option>
             <option value="file">file</option>
           </select>
-          <button onClick={() => onChange(fields.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
+          <button type="button" onClick={() => onChange(fields.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
         </div>
       ))}
-      <button onClick={() => onChange([...fields, { name: "value", label: "Value", type: "text" }])}>Add field</button>
+      <button type="button" onClick={() => onChange([...fields, { name: "value", label: "Value", type: "text" }])}>Add field</button>
     </div>
   );
 }
@@ -553,6 +573,7 @@ function Runner({ workflowId }) {
   const [debugOpen, setDebugOpen] = useState(false);
   const [edgeData, setEdgeData] = useState(null);
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     api(`/api/workflows/${workflowId}`).then(setWorkflow).catch((err) => setError(err.message));
@@ -568,6 +589,7 @@ function Runner({ workflowId }) {
   async function submit(event) {
     event.preventDefault();
     setError("");
+    setIsSubmitting(true);
     try {
       const result = await api(`/api/workflows/${workflowId}/runs`, { method: "POST", body: JSON.stringify({ input: formValues }) });
       setRun(result);
@@ -575,6 +597,8 @@ function Runner({ workflowId }) {
       setRuns(await api(`/api/workflows/${workflowId}/runs`));
     } catch (err) {
       setError(err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -601,7 +625,14 @@ function Runner({ workflowId }) {
               ))}
             </div>
           ))}
-          <button className="primary" type="submit">Submit</button>
+          <button className="primary" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? (
+              <>
+                <span className="spinner" aria-hidden="true" />
+                Submitting...
+              </>
+            ) : "Submit"}
+          </button>
         </form>
         <section className="resultPane">
           <div className="panelHead">

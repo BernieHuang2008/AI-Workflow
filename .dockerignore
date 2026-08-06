@@ -1,0 +1,9 @@
+.git
+.github
+.local-data
+.local-runtime
+**/__pycache__
+**/*.pyc
+**/.env
+frontend/dist
+frontend/node_modules

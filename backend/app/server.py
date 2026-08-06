@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import traceback
 import uuid
@@ -9,13 +10,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 
-ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = Path(os.environ.get("AI_WORKFLOW_CONFIG", ROOT / "config" / "config.json"))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_PATH = Path(os.environ.get("AI_WORKFLOW_CONFIG", PROJECT_ROOT / "config" / "config.json"))
 DATA_DIR = Path(os.environ.get("AI_WORKFLOW_DATA_DIR", "/data/ai-workflow"))
+FRONTEND_DIST_DIR = Path(os.environ.get("AI_WORKFLOW_FRONTEND_DIST", PROJECT_ROOT / "frontend" / "dist"))
 WORKFLOWS_DIR = DATA_DIR / "workflows"
 RUNS_DIR = DATA_DIR / "runs"
 DEFAULT_ENDPOINTS = [
@@ -466,6 +468,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_file(self, path: Path) -> None:
+        body = path.read_bytes()
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_frontend(self, path: str) -> bool:
+        dist_root = FRONTEND_DIST_DIR.resolve()
+        if not dist_root.exists():
+            return False
+        rel_path = unquote(path.lstrip("/"))
+        candidate = (dist_root / rel_path).resolve() if rel_path else dist_root / "index.html"
+        if rel_path and not candidate.is_relative_to(dist_root):
+            return False
+        if candidate.is_file():
+            self.send_file(candidate)
+            return True
+        if not Path(rel_path).suffix:
+            index_file = dist_root / "index.html"
+            if index_file.is_file():
+                self.send_file(index_file)
+                return True
+        return False
+
     def read_body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if not length:
@@ -521,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(201, create_run(workflow_id, payload.get("input", payload)))
             if len(parts) == 3 and parts[:2] == ["api", "runs"] and method == "GET":
                 return self.send_json(200, read_json(run_path(parts[2])))
+            if method == "GET" and self.serve_frontend(parsed.path):
+                return
             return self.send_json(404, {"error": "Not found"})
         except KeyError as exc:
             return self.send_json(404, {"error": str(exc)})

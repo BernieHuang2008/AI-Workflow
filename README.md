@@ -28,15 +28,27 @@ docker compose up --build
 Open:
 
 - App: http://localhost:5010
-- Backend health through nginx: http://localhost:5010/health
+- Health: http://localhost:5010/health
 
-Only the frontend nginx container publishes a host port. The backend listens on port `8000` inside the Docker network and is reached by nginx as `http://backend:8000`.
+The app now runs in a single container. The Python backend serves both the API and the built frontend bundle from the same origin.
 
 Docker Compose maps persistent data to the host path:
 
 ```text
 /data/ai-workflow
 ```
+
+## Docker Hub CI/CD
+
+GitHub Actions publishes the image from [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml).
+
+Required secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+- `DOCKERHUB_REPOSITORY`
+
+The workflow tags the image as `latest` and with the current commit SHA.
 
 ## Backend Config
 

@@ -1,20 +1,13 @@
 services:
-  backend:
+  app:
     build:
-      context: ./backend
-    expose:
-      - "8000"
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5010:8000"
     environment:
       AI_WORKFLOW_CONFIG: /app/config/config.json
       AI_WORKFLOW_DATA_DIR: /data/ai-workflow
     volumes:
       - ./config:/app/config:ro
       - /data/ai-workflow:/data/ai-workflow
-
-  frontend:
-    build:
-      context: ./frontend
-    ports:
-      - "5010:80"
-    depends_on:
-      - backend

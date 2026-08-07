@@ -57,6 +57,11 @@ The workflow tags the image as `latest` and with the current commit SHA.
 ```json
 {
   "port": 8000,
+  "auth": {
+    "secretKey": "CHANGE_ME_TO_A_LONG_RANDOM_SECRET",
+    "cookieName": "ai_workflow_secret",
+    "allowedHost": "ai-workflow.berniehg.top"
+  },
   "apiEndpoints": [
     {
       "id": "paddleocr",
@@ -80,6 +85,20 @@ The workflow tags the image as `latest` and with the current commit SHA.
 ```
 
 The frontend receives `id`, `type`, `provider`, `label`, and `description` from `/api/config/catalog`.
+
+### Public Auth Gate
+
+Set `auth.secretKey` in `config/config.json`, or set the `AI_WORKFLOW_SECRET` environment variable. When a secret is configured, every `/api/*` route except `/api/auth/status` and `/api/auth/session` requires the matching auth cookie.
+
+The first visit shows a secret-key dialog. A valid secret is stored by the backend as a single host-only cookie named `ai_workflow_secret` by default. The cookie is set with `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, and a long-lived max age, and no `Domain` attribute is written. For `https://ai-workflow.berniehg.top`, that keeps the cookie scoped to `ai-workflow.berniehg.top` only, not `berniehg.top` or sibling subdomains.
+
+You can override:
+
+```powershell
+$env:AI_WORKFLOW_SECRET="your-long-random-secret"
+$env:AI_WORKFLOW_ALLOWED_HOST="ai-workflow.berniehg.top"
+$env:AI_WORKFLOW_AUTH_COOKIE_NAME="ai_workflow_secret"
+```
 
 ## Workflow JSON Shape
 

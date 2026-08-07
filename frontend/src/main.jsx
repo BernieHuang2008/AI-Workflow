@@ -5,6 +5,8 @@ import "./styles.css";
 const API_BASE = "";
 const NODE_W = 236;
 const PORT_STEP = 30;
+const AUTH_EXPIRED_EVENT = "ai-workflow-auth-expired";
+const terminalRunStatuses = new Set(["succeeded", "failed"]);
 
 const baseFields = [
   { name: "topic", label: "Topic", type: "text" },
@@ -65,6 +67,24 @@ function connect(fromNodeId, fromPort, toNodeId, toPort) {
   return { id: makeId("edge"), from: { nodeId: fromNodeId, port: fromPort }, to: { nodeId: toNodeId, port: toPort } };
 }
 
+function nodeTrace(trace, nodeId) {
+  return trace?.nodes?.find((item) => item.nodeId === nodeId);
+}
+
+function statusLabel(status) {
+  if (status === "succeeded") return "Done";
+  if (status === "running") return "Running";
+  if (status === "failed") return "Failed";
+  return "Pending";
+}
+
+function formatLocalTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 function portsFor(node) {
   if (!node) return { inputs: [], outputs: [] };
   if (node.type === "input") {
@@ -88,13 +108,62 @@ function portsFor(node) {
   return { inputs: [], outputs: [] };
 }
 
+function syncNodeEdges(edges, previousNode, nextNode) {
+  if (!previousNode || !nextNode) return edges;
+  const previousPorts = portsFor(previousNode);
+  const nextPorts = portsFor(nextNode);
+  const stablePorts = new Set(["form"]);
+  const mapPorts = (previousList, nextList) => {
+    const mapped = new Map();
+    const nextSequence = nextList.filter((port) => !stablePorts.has(port));
+    let nextIndex = 0;
+    previousList.forEach((port) => {
+      if (stablePorts.has(port)) {
+        if (nextList.includes(port)) mapped.set(port, port);
+        return;
+      }
+      mapped.set(port, nextSequence[nextIndex]);
+      nextIndex += 1;
+    });
+    return mapped;
+  };
+  const inputMap = mapPorts(previousPorts.inputs, nextPorts.inputs);
+  const outputMap = mapPorts(previousPorts.outputs, nextPorts.outputs);
+
+  return edges.reduce((acc, edge) => {
+    let nextEdge = edge;
+    if (edge.to.nodeId === previousNode.id) {
+      const mappedPort = inputMap.get(edge.to.port);
+      if (mappedPort === undefined) return acc;
+      if (mappedPort !== edge.to.port) {
+        nextEdge = { ...nextEdge, to: { ...nextEdge.to, port: mappedPort } };
+      }
+    }
+    if (edge.from.nodeId === previousNode.id) {
+      const mappedPort = outputMap.get(edge.from.port);
+      if (mappedPort === undefined) return acc;
+      if (mappedPort !== edge.from.port) {
+        nextEdge = { ...nextEdge, from: { ...nextEdge.from, port: mappedPort } };
+      }
+    }
+    acc.push(nextEdge);
+    return acc;
+  }, []);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Request failed");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
+    }
+    throw new Error(payload.error || "Request failed");
+  }
   return payload;
 }
 
@@ -107,6 +176,89 @@ function useRoute() {
   }, []);
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   return { page: parts[0] || "list", id: parts[1] };
+}
+
+function AuthGate() {
+  const [auth, setAuth] = useState({ checking: true, required: false, authenticated: false, hostAllowed: true });
+
+  async function checkAuth() {
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/status`, { credentials: "same-origin" });
+      const payload = await response.json();
+      setAuth({ checking: false, ...payload });
+    } catch (err) {
+      setAuth({ checking: false, required: true, authenticated: false, hostAllowed: true, error: err.message });
+    }
+  }
+
+  useEffect(() => {
+    checkAuth();
+    const onExpired = () => setAuth((current) => ({ ...current, required: true, authenticated: false }));
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  if (auth.checking) {
+    return <main className="page">Loading...</main>;
+  }
+
+  if (auth.required && !auth.authenticated) {
+    return <AuthDialog auth={auth} onAuthenticated={checkAuth} />;
+  }
+
+  return <App />;
+}
+
+function AuthDialog({ auth, onAuthenticated }) {
+  const [secretKey, setSecretKey] = useState("");
+  const [error, setError] = useState(auth.error || "");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/session`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secretKey })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "Invalid secret key");
+      setSecretKey("");
+      await onAuthenticated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="authBackdrop">
+      <form className="authDialog" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="authTitle">
+        <h1 id="authTitle">AI Workflow</h1>
+        <label>
+          Secret key
+          <input
+            autoFocus
+            type="password"
+            value={secretKey}
+            onChange={(event) => setSecretKey(event.target.value)}
+            autoComplete="current-password"
+            disabled={!auth.hostAllowed || submitting}
+          />
+        </label>
+        {!auth.hostAllowed && <div className="notice">Please open this app from {auth.allowedHost}.</div>}
+        {error && <div className="notice">{error}</div>}
+        <button className="primary" type="submit" disabled={!auth.hostAllowed || submitting || !secretKey}>
+          {submitting ? "Checking..." : "Unlock"}
+        </button>
+      </form>
+    </div>
+  );
 }
 
 function App() {
@@ -166,7 +318,7 @@ function WorkflowList() {
             <div className="meta">{item.nodeCount} nodes</div>
             <div className="actions">
               <a className="button" href={`#/edit/${item.id}`}>Edit</a>
-              <a className="button primary" href={`#/run/${item.id}`}>Run</a>
+              <a className="button primary" href={`#/run/${item.id}`}>Run / Records</a>
             </div>
           </article>
         ))}
@@ -218,6 +370,20 @@ function Editor({ workflowId }) {
       ...current,
       nodes: current.nodes.map((node) => (node.id === nodeId ? updater(node) : node))
     }));
+    markDirty();
+  }
+
+  function updateNodeWithEdgeSync(nodeId, updater) {
+    setWorkflow((current) => {
+      const previousNode = current.nodes.find((node) => node.id === nodeId);
+      if (!previousNode) return current;
+      const nextNode = updater(previousNode);
+      return {
+        ...current,
+        nodes: current.nodes.map((node) => (node.id === nodeId ? nextNode : node)),
+        edges: syncNodeEdges(current.edges, previousNode, nextNode)
+      };
+    });
     markDirty();
   }
 
@@ -338,7 +504,7 @@ function Editor({ workflowId }) {
         <Inspector
           node={selected}
           catalog={catalog}
-          onChange={(next) => updateNode(selected.id, () => next)}
+          onChange={(next) => updateNodeWithEdgeSync(selected.id, () => next)}
           onRemove={() => selected && removeNode(selected.id)}
           edges={workflow.edges}
           onRemoveEdge={(edgeId) => setWorkflow((current) => ({ ...current, edges: current.edges.filter((edge) => edge.id !== edgeId) }))}
@@ -379,17 +545,25 @@ function EdgeLayer({ workflow, trace, onEdgeClick }) {
   );
 }
 
-function FlowNode({ node, selected, connecting, onMouseDown, onPortClick }) {
+function StatusBadge({ status }) {
+  if (!status) return null;
+  return <span className={`nodeStatus ${status}`} title={statusLabel(status)} aria-label={statusLabel(status)} />;
+}
+
+function FlowNode({ node, selected, connecting, status, onMouseDown, onPortClick }) {
   const { inputs, outputs } = portsFor(node);
   return (
     <article
-      className={`flowNode ${selected ? "selected" : ""} ${node.type}`}
+      className={`flowNode ${selected ? "selected" : ""} ${node.type} ${status ? `status-${status}` : ""}`}
       style={{ left: node.position.x, top: node.position.y }}
       onMouseDown={onMouseDown}
     >
       <div className="nodeHead">
-        <span>{node.title}</span>
-        <small>{node.type}</small>
+        <div className="nodeText">
+          <span>{node.title}</span>
+          <small>{node.type}</small>
+        </div>
+        <StatusBadge status={status} />
       </div>
       <div className="portRows">
         <div>
@@ -581,6 +755,32 @@ function Runner({ workflowId }) {
   }, [workflowId]);
 
   const inputNodes = useMemo(() => workflow?.nodes.filter((node) => node.type === "input") || [], [workflow]);
+  const isRunning = run?.status === "running";
+
+  useEffect(() => {
+    if (!run?.id || terminalRunStatuses.has(run.status)) return undefined;
+    let cancelled = false;
+
+    async function pollStatus() {
+      try {
+        const next = await api(`/api/runs/${run.id}/status`);
+        if (cancelled) return;
+        setRun(next);
+        if (terminalRunStatuses.has(next.status)) {
+          setRuns(await api(`/api/workflows/${workflowId}/runs`));
+        }
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      }
+    }
+
+    const timer = window.setInterval(pollStatus, 800);
+    pollStatus();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [run?.id, run?.status, workflowId]);
 
   function setField(nodeId, name, value) {
     setFormValues((current) => ({ ...current, [nodeId]: { ...(current[nodeId] || {}), [name]: value } }));
@@ -591,14 +791,43 @@ function Runner({ workflowId }) {
     setError("");
     setIsSubmitting(true);
     try {
+      setEdgeData(null);
+      setDebugOpen(true);
       const result = await api(`/api/workflows/${workflowId}/runs`, { method: "POST", body: JSON.stringify({ input: formValues }) });
       setRun(result);
-      setDebugOpen(false);
       setRuns(await api(`/api/workflows/${workflowId}/runs`));
     } catch (err) {
       setError(err.message);
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function openRun(runId) {
+    setError("");
+    setEdgeData(null);
+    try {
+      const next = await api(`/api/runs/${runId}/status`);
+      setRun(next);
+      setDebugOpen(true);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function deleteRun(runId) {
+    if (!window.confirm("Delete this run record?")) return;
+    setError("");
+    try {
+      await api(`/api/runs/${runId}`, { method: "DELETE" });
+      setRuns((current) => current.filter((item) => item.id !== runId));
+      if (run?.id === runId) {
+        setRun(null);
+        setDebugOpen(false);
+        setEdgeData(null);
+      }
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -625,11 +854,11 @@ function Runner({ workflowId }) {
               ))}
             </div>
           ))}
-          <button className="primary" type="submit" disabled={isSubmitting}>
-            {isSubmitting ? (
+          <button className="primary" type="submit" disabled={isSubmitting || isRunning}>
+            {isSubmitting || isRunning ? (
               <>
                 <span className="spinner" aria-hidden="true" />
-                Submitting...
+                {isRunning ? "Running..." : "Submitting..."}
               </>
             ) : "Submit"}
           </button>
@@ -637,29 +866,82 @@ function Runner({ workflowId }) {
         <section className="resultPane">
           <div className="panelHead">
             <h2>Output</h2>
+            {run?.status && <span className={`runStatus ${run.status}`}>{statusLabel(run.status)}</span>}
             {run?.output && <DownloadButton output={run.output} />}
           </div>
           <ProductView output={run?.output} />
-          <button className="button" disabled={!run} onClick={() => setDebugOpen((open) => !open)}>Debug trace</button>
+          <button className="button" disabled={!run} onClick={() => setDebugOpen((open) => !open)}>
+            {debugOpen ? "Hide trace" : "Show trace"}
+          </button>
         </section>
       </section>
-      {debugOpen && run && (
+      {run && (debugOpen || isRunning) && (
         <section className="debugPane">
           <div className="debugCanvas">
             <EdgeLayer workflow={workflow} trace={run.trace} onEdgeClick={(edge, value) => setEdgeData({ edge, value })} />
-            {workflow.nodes.map((node) => <FlowNode key={node.id} node={node} selected={false} onMouseDown={() => {}} onPortClick={() => {}} />)}
+            {workflow.nodes.map((node) => (
+              <FlowNode
+                key={node.id}
+                node={node}
+                selected={false}
+                status={nodeTrace(run.trace, node.id)?.status || "pending"}
+                onMouseDown={() => {}}
+                onPortClick={() => {}}
+              />
+            ))}
           </div>
-          <aside className="edgeData">
-            <h2>Edge Data</h2>
-            <pre>{edgeData ? JSON.stringify(edgeData, null, 2) : "Click an edge to inspect the value from this session."}</pre>
-          </aside>
+          <RunSteps workflow={workflow} run={run} edgeData={edgeData} />
         </section>
       )}
       <section className="history">
-        <h2>Persisted Runs</h2>
-        {runs.map((item) => <div className="historyRow" key={item.id}>{item.status} - {item.startedAt}</div>)}
+        <h2>History Runs</h2>
+        {runs.map((item) => (
+          <div className={`historyRow ${run?.id === item.id ? "selected" : ""}`} key={item.id}>
+            <button type="button" className="historyOpen" onClick={() => openRun(item.id)}>
+              <span className={`runStatus ${item.status}`}>{statusLabel(item.status)}</span>
+              <span>{formatLocalTime(item.startedAt)}</span>
+            </button>
+            <button type="button" className="danger historyDelete" onClick={() => deleteRun(item.id)}>
+              Delete
+            </button>
+          </div>
+        ))}
       </section>
     </main>
+  );
+}
+
+function RunSteps({ workflow, run, edgeData }) {
+  return (
+    <aside className="edgeData runLog">
+      <div className="panelHead">
+        <h2>Run Log</h2>
+        <span className={`runStatus ${run.status}`}>{statusLabel(run.status)}</span>
+      </div>
+      <div className="stepList">
+        {workflow.nodes.map((node) => {
+          const item = nodeTrace(run.trace, node.id) || { status: "pending" };
+          const status = item.status || "pending";
+          return (
+            <div className={`stepRow ${status}`} key={node.id}>
+              <StatusBadge status={status} />
+              <div>
+                <strong>{node.title}</strong>
+                <small>{statusLabel(status)}</small>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {(run.error || run.traceback) && (
+        <>
+          <h3>Error</h3>
+          <pre className="traceback">{[run.error, run.traceback].filter(Boolean).join("\n\n")}</pre>
+        </>
+      )}
+      <h3>Edge Data</h3>
+      <pre>{edgeData ? JSON.stringify(edgeData, null, 2) : "Click an edge to inspect the value from this session."}</pre>
+    </aside>
   );
 }
 
@@ -706,4 +988,4 @@ function DownloadButton({ output }) {
   return <a className="button primary" href={url} download={`workflow-output.${extension}`}>Download</a>;
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(<AuthGate />);

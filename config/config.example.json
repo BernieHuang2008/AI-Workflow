@@ -1,5 +1,10 @@
 {
   "port": 8000,
+  "auth": {
+    "secretKey": "CHANGE_ME_TO_A_LONG_RANDOM_SECRET",
+    "cookieName": "ai_workflow_secret",
+    "allowedHost": "ai-workflow.berniehg.top"
+  },
   "apiEndpoints": [
     {
       "id": "paddleocr",
@@ -11,23 +16,13 @@
       "apiKey": "YOUR_PADDLEOCR_TOKEN"
     },
     {
-      "id": "deepseek-v4-flash",
+      "id": "deepseek",
       "type": "llm",
       "provider": "deepseek",
       "label": "DeepSeek",
       "description": "DeepSeek chat completions endpoint.",
       "url": "https://api.deepseek.com/v1/chat/completions",
       "model": "deepseek-v4-flash",
-      "apiKey": "YOUR_DEEPSEEK_API_KEY"
-    },
-    {
-      "id": "deepseek-v4-pro",
-      "type": "llm",
-      "provider": "deepseek",
-      "label": "DeepSeek",
-      "description": "DeepSeek chat completions endpoint.",
-      "url": "https://api.deepseek.com/v1/chat/completions",
-      "model": "deepseek-v4-pro",
       "apiKey": "YOUR_DEEPSEEK_API_KEY"
     }
   ]

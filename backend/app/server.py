@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import base64
+import builtins as py_builtins
+import hmac
 import json
 import mimetypes
 import os
 import ssl
+import threading
+import time
 import traceback
 import uuid
 from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,6 +27,9 @@ DATA_DIR = Path(os.environ.get("AI_WORKFLOW_DATA_DIR", "data"))
 FRONTEND_DIST_DIR = Path(os.environ.get("AI_WORKFLOW_FRONTEND_DIST", PROJECT_ROOT / "frontend" / "dist"))
 WORKFLOWS_DIR = DATA_DIR / "workflows"
 RUNS_DIR = DATA_DIR / "runs"
+RUN_LOCK = threading.Lock()
+DELETED_RUNS: set[str] = set()
+TRACE_STRING_LIMIT = 6000
 DEFAULT_ENDPOINTS = [
     {
         "id": "paddleocr",
@@ -62,11 +70,53 @@ def load_config() -> dict[str, Any]:
 
 
 CONFIG = load_config()
+AUTH_CONFIG = CONFIG.get("auth", {})
+AUTH_SECRET = os.environ.get("AI_WORKFLOW_SECRET") or AUTH_CONFIG.get("secretKey", "")
+AUTH_COOKIE_NAME = os.environ.get("AI_WORKFLOW_AUTH_COOKIE_NAME") or AUTH_CONFIG.get("cookieName", "ai_workflow_secret")
+AUTH_ALLOWED_HOST = os.environ.get("AI_WORKFLOW_ALLOWED_HOST") or AUTH_CONFIG.get("allowedHost", "ai-workflow.berniehg.top")
+AUTH_COOKIE_MAX_AGE = 2_147_483_647
 
 
 def ensure_storage() -> None:
     WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def auth_enabled() -> bool:
+    return bool(AUTH_SECRET)
+
+
+def host_without_port(host: str) -> str:
+    value = host.strip().lower()
+    if not value:
+        return ""
+    if value.startswith("["):
+        return value.split("]", 1)[0].lstrip("[")
+    return value.rsplit(":", 1)[0]
+
+
+def parse_cookie(header: str | None, name: str) -> str | None:
+    if not header:
+        return None
+    cookie = SimpleCookie()
+    try:
+        cookie.load(header)
+    except Exception:
+        return None
+    morsel = cookie.get(name)
+    return morsel.value if morsel else None
+
+
+def make_auth_cookie(secret: str, max_age: int = AUTH_COOKIE_MAX_AGE) -> str:
+    cookie = SimpleCookie()
+    cookie[AUTH_COOKIE_NAME] = secret
+    cookie[AUTH_COOKIE_NAME]["path"] = "/"
+    cookie[AUTH_COOKIE_NAME]["max-age"] = str(max_age)
+    cookie[AUTH_COOKIE_NAME]["expires"] = "Fri, 31 Dec 9999 23:59:59 GMT"
+    cookie[AUTH_COOKIE_NAME]["samesite"] = "Strict"
+    cookie[AUTH_COOKIE_NAME]["secure"] = True
+    cookie[AUTH_COOKIE_NAME]["httponly"] = True
+    return cookie.output(header="").strip()
 
 
 def public_catalog() -> dict[str, Any]:
@@ -114,7 +164,107 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
-    tmp_path.replace(path)
+    for attempt in range(12):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt == 11:
+                raise
+            time.sleep(0.05)
+
+
+def write_run_record(record: dict[str, Any]) -> None:
+    with RUN_LOCK:
+        if record["id"] in DELETED_RUNS:
+            return
+        write_json(run_path(record["id"]), record)
+
+
+def summarize_for_trace(value: Any) -> Any:
+    if isinstance(value, str):
+        if value.startswith("data:") and ";base64," in value:
+            return f"<data-url {len(value)} chars>"
+        if len(value) > TRACE_STRING_LIMIT:
+            return value[:TRACE_STRING_LIMIT] + f"\n... <truncated {len(value) - TRACE_STRING_LIMIT} chars>"
+        return value
+    if isinstance(value, list):
+        return [summarize_for_trace(item) for item in value]
+    if isinstance(value, dict):
+        return {key: summarize_for_trace(item) for key, item in value.items()}
+    return value
+
+
+def initial_trace(workflow: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "nodes": [
+            {
+                "nodeId": node["id"],
+                "title": node.get("title"),
+                "type": node.get("type"),
+                "status": "pending",
+            }
+            for node in workflow.get("nodes", [])
+        ],
+        "edges": [
+            {
+                "edgeId": edge.get("id"),
+                "from": edge.get("from"),
+                "to": edge.get("to"),
+                "value": None,
+            }
+            for edge in workflow.get("edges", [])
+        ],
+    }
+
+
+def build_edge_trace(edges: list[dict[str, Any]], node_outputs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "edgeId": edge.get("id"),
+            "from": edge.get("from"),
+            "to": edge.get("to"),
+            "value": summarize_for_trace(node_outputs.get(edge["from"]["nodeId"], {}).get(edge["from"]["port"])),
+        }
+        for edge in edges
+    ]
+
+
+def set_trace_node(
+    record: dict[str, Any],
+    workflow: dict[str, Any],
+    node: dict[str, Any],
+    status: str,
+    node_inputs: dict[str, Any] | None = None,
+    output: dict[str, Any] | None = None,
+    error: str | None = None,
+    stack: str | None = None,
+    node_outputs: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    trace = record.setdefault("trace", initial_trace(workflow))
+    entry = next((item for item in trace.get("nodes", []) if item.get("nodeId") == node["id"]), None)
+    if entry is None:
+        entry = {"nodeId": node["id"], "title": node.get("title"), "type": node.get("type")}
+        trace.setdefault("nodes", []).append(entry)
+    entry["status"] = status
+    entry["updatedAt"] = now_iso()
+    if status == "running":
+        entry.setdefault("startedAt", entry["updatedAt"])
+    if status in ("succeeded", "failed"):
+        entry["finishedAt"] = entry["updatedAt"]
+    if node_inputs is not None:
+        entry["input"] = summarize_for_trace(node_inputs)
+    if output is not None:
+        entry["output"] = summarize_for_trace(output)
+    if error:
+        entry["error"] = error
+    if stack:
+        entry["traceback"] = stack
+        record["traceback"] = stack
+    if status == "failed":
+        record["failedNode"] = {"nodeId": node["id"], "title": node.get("title"), "type": node.get("type")}
+    if node_outputs is not None:
+        trace["edges"] = build_edge_trace(workflow.get("edges", []), node_outputs)
 
 
 def list_workflows() -> list[dict[str, Any]]:
@@ -344,9 +494,7 @@ def execute_llm_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
     config = node.get("config", {})
     endpoint = endpoint_by_id(config.get("endpointId"), "llm")
     template = config.get("template", "Summarize:\n{{textList}}")
-    input_ports = config.get("inputPorts") or ["textList"]
-    prompt_values = {port: inputs.get(port, "") for port in input_ports}
-    prompt_values.update(inputs)
+    prompt_values = dict(inputs)
     if "textList" not in prompt_values:
         prompt_values["textList"] = inputs.get("ocrResultList") or inputs.get("content") or ""
     prompt = render_template(template, prompt_values)
@@ -370,9 +518,15 @@ def execute_llm_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
 def execute_python_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
     config = node.get("config", {})
     script = config.get("script", "def process(**kwargs):\n    return kwargs\n")
-    function_name = config.get("functionName", "process")
-    input_ports = config.get("inputPorts") or []
-    call_inputs = {port: inputs.get(port) for port in input_ports} if input_ports else dict(inputs)
+    function_name = config.get("functionName") or "process"
+    allowed_imports = {"json"}
+
+    def safe_import(name: str, globals_: Any = None, locals_: Any = None, fromlist: Any = (), level: int = 0) -> Any:
+        root_name = name.split(".", 1)[0]
+        if root_name not in allowed_imports:
+            raise ImportError(f"import of '{name}' is not allowed")
+        return py_builtins.__import__(name, globals_, locals_, fromlist, level)
+
     namespace: dict[str, Any] = {
         "__builtins__": {
             "len": len,
@@ -382,17 +536,19 @@ def execute_python_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[st
             "str": str,
             "int": int,
             "float": float,
+            "isinstance": isinstance,
             "list": list,
             "dict": dict,
             "range": range,
             "enumerate": enumerate,
             "json": json,
+            "__import__": safe_import,
         }
     }
     exec(script, namespace)
     if function_name not in namespace:
         raise ValueError(f"Function {function_name} was not defined")
-    result = namespace[function_name](**call_inputs)
+    result = namespace[function_name](**inputs)
     return result if isinstance(result, dict) else {"result": result}
 
 
@@ -449,7 +605,7 @@ def collect_inputs(node_id: str, edges: list[dict[str, Any]], node_outputs: dict
     return values
 
 
-def execute_workflow(workflow: dict[str, Any], run_inputs: dict[str, Any]) -> dict[str, Any]:
+def execute_workflow(workflow: dict[str, Any], run_inputs: dict[str, Any], on_node_update: Any | None = None) -> dict[str, Any]:
     nodes = workflow.get("nodes", [])
     edges = workflow.get("edges", [])
     node_outputs: dict[str, dict[str, Any]] = {}
@@ -459,22 +615,32 @@ def execute_workflow(workflow: dict[str, Any], run_inputs: dict[str, Any]) -> di
         executor = EXECUTORS.get(node.get("type"))
         if not executor:
             raise ValueError(f"Unknown node type: {node.get('type')}")
-        if node.get("type") == "input":
-            output = executor(node, run_inputs)
-        else:
-            output = executor(node, node_inputs)
+        if on_node_update:
+            on_node_update("running", node, node_inputs, None, None, None, node_outputs)
+        try:
+            if node.get("type") == "input":
+                output = executor(node, run_inputs)
+            else:
+                output = executor(node, node_inputs)
+        except Exception as exc:
+            stack = traceback.format_exc()
+            if on_node_update:
+                on_node_update("failed", node, node_inputs, None, str(exc), stack, node_outputs)
+            raise
         node_outputs[node["id"]] = output
-        trace_nodes.append({"nodeId": node["id"], "title": node.get("title"), "input": node_inputs, "output": output})
-    edge_trace = []
-    for edge in edges:
-        edge_trace.append(
+        if on_node_update:
+            on_node_update("succeeded", node, node_inputs, output, None, None, node_outputs)
+        trace_nodes.append(
             {
-                "edgeId": edge.get("id"),
-                "from": edge.get("from"),
-                "to": edge.get("to"),
-                "value": node_outputs.get(edge["from"]["nodeId"], {}).get(edge["from"]["port"]),
+                "nodeId": node["id"],
+                "title": node.get("title"),
+                "type": node.get("type"),
+                "status": "succeeded",
+                "input": summarize_for_trace(node_inputs),
+                "output": summarize_for_trace(output),
             }
         )
+    edge_trace = build_edge_trace(edges, node_outputs)
     output_nodes = [node for node in nodes if node.get("type") == "output"]
     product = None
     if output_nodes:
@@ -482,37 +648,71 @@ def execute_workflow(workflow: dict[str, Any], run_inputs: dict[str, Any]) -> di
     return {"product": product, "trace": {"nodes": trace_nodes, "edges": edge_trace}}
 
 
+def run_status(record: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "id": record.get("id"),
+        "workflowId": record.get("workflowId"),
+        "status": record.get("status"),
+        "output": record.get("output"),
+        "error": record.get("error"),
+        "failedNode": record.get("failedNode"),
+        "traceback": record.get("traceback"),
+        "startedAt": record.get("startedAt"),
+        "finishedAt": record.get("finishedAt"),
+        "trace": record.get("trace"),
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def finish_run(record: dict[str, Any], workflow: dict[str, Any], run_inputs: dict[str, Any]) -> None:
+    def on_node_update(
+        status: str,
+        node: dict[str, Any],
+        node_inputs: dict[str, Any],
+        output: dict[str, Any] | None,
+        error: str | None,
+        stack: str | None,
+        node_outputs: dict[str, dict[str, Any]],
+    ) -> None:
+        set_trace_node(record, workflow, node, status, node_inputs, output, error, stack, node_outputs)
+        write_run_record(record)
+
+    try:
+        execution = execute_workflow(workflow, run_inputs, on_node_update=on_node_update)
+        record["status"] = "succeeded"
+        record["output"] = execution["product"]
+        record["trace"]["edges"] = execution["trace"]["edges"]
+        record["finishedAt"] = now_iso()
+        write_run_record(record)
+    except Exception as exc:
+        record["status"] = "failed"
+        record["output"] = None
+        record["error"] = str(exc)
+        record["traceback"] = record.get("traceback") or traceback.format_exc()
+        record["finishedAt"] = now_iso()
+        write_run_record(record)
+
+
 def create_run(workflow_id: str, run_inputs: dict[str, Any]) -> dict[str, Any]:
     ensure_storage()
     workflow = get_workflow(workflow_id)
     run_id = str(uuid.uuid4())
+    DELETED_RUNS.discard(run_id)
     started_at = now_iso()
-    try:
-        execution = execute_workflow(workflow, run_inputs)
-        record = {
-            "id": run_id,
-            "workflowId": workflow_id,
-            "status": "succeeded",
-            "input": run_inputs,
-            "output": execution["product"],
-            "startedAt": started_at,
-            "finishedAt": now_iso(),
-        }
-        write_json(run_path(run_id), record)
-        return {**record, "trace": execution["trace"]}
-    except Exception as exc:
-        record = {
-            "id": run_id,
-            "workflowId": workflow_id,
-            "status": "failed",
-            "input": run_inputs,
-            "output": None,
-            "error": str(exc),
-            "startedAt": started_at,
-            "finishedAt": now_iso(),
-        }
-        write_json(run_path(run_id), record)
-        raise
+    record = {
+        "id": run_id,
+        "workflowId": workflow_id,
+        "status": "running",
+        "input": run_inputs,
+        "output": None,
+        "startedAt": started_at,
+        "finishedAt": None,
+        "trace": initial_trace(workflow),
+    }
+    write_run_record(record)
+    thread = threading.Thread(target=finish_run, args=(record, workflow, run_inputs), daemon=True)
+    thread.start()
+    return run_status(record)
 
 
 def list_runs(workflow_id: str) -> list[dict[str, Any]]:
@@ -537,14 +737,45 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "AIWorkflow/0.1"
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "")
+        if self.origin_allowed(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
         super().end_headers()
 
-    def send_json(self, status: int, payload: Any) -> None:
+    def origin_allowed(self, origin: str) -> bool:
+        if not origin:
+            return False
+        if auth_enabled():
+            return bool(AUTH_ALLOWED_HOST) and origin == f"https://{AUTH_ALLOWED_HOST}"
+        return origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")
+
+    def request_host_allowed(self) -> bool:
+        if not auth_enabled() or not AUTH_ALLOWED_HOST:
+            return True
+        return host_without_port(self.headers.get("Host", "")) == AUTH_ALLOWED_HOST.lower()
+
+    def auth_cookie_valid(self) -> bool:
+        if not auth_enabled():
+            return True
+        value = parse_cookie(self.headers.get("Cookie"), AUTH_COOKIE_NAME)
+        return bool(value) and hmac.compare_digest(value, AUTH_SECRET)
+
+    def request_authenticated(self) -> bool:
+        return self.request_host_allowed() and self.auth_cookie_valid()
+
+    def send_json(self, status: int, payload: Any, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -606,6 +837,39 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/health":
                 return self.send_json(200, {"ok": True})
+            if parts == ["api", "auth", "status"] and method == "GET":
+                host_allowed = self.request_host_allowed()
+                return self.send_json(
+                    200,
+                    {
+                        "required": auth_enabled(),
+                        "authenticated": (not auth_enabled()) or (host_allowed and self.auth_cookie_valid()),
+                        "cookieName": AUTH_COOKIE_NAME,
+                        "allowedHost": AUTH_ALLOWED_HOST,
+                        "hostAllowed": host_allowed,
+                    },
+                )
+            if parts == ["api", "auth", "session"] and method == "POST":
+                if not auth_enabled():
+                    return self.send_json(200, {"authenticated": True})
+                if not self.request_host_allowed():
+                    return self.send_json(403, {"error": "This host is not allowed"})
+                payload = self.read_body()
+                secret = str(payload.get("secretKey", ""))
+                if not secret or not hmac.compare_digest(secret, AUTH_SECRET):
+                    return self.send_json(401, {"error": "Invalid secret key"})
+                return self.send_json(
+                    200,
+                    {"authenticated": True},
+                    headers={"Set-Cookie": make_auth_cookie(secret)},
+                )
+            if parts == ["api", "auth", "session"] and method == "DELETE":
+                return self.send_json(200, {"authenticated": False}, headers={"Set-Cookie": make_auth_cookie("", max_age=0)})
+            if parts and parts[0] == "api" and parts[:2] != ["api", "auth"]:
+                if not self.request_host_allowed():
+                    return self.send_json(403, {"error": "This host is not allowed"})
+                if not self.auth_cookie_valid():
+                    return self.send_json(401, {"error": "Unauthorized"})
             if parts == ["api", "config", "catalog"] and method == "GET":
                 return self.send_json(200, public_catalog())
             if parts == ["api", "workflows"] and method == "GET":
@@ -630,8 +894,19 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "POST":
                     payload = self.read_body()
                     return self.send_json(201, create_run(workflow_id, payload.get("input", payload)))
-            if len(parts) == 3 and parts[:2] == ["api", "runs"] and method == "GET":
-                return self.send_json(200, read_json(run_path(parts[2])))
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "status" and method == "GET":
+                return self.send_json(200, run_status(read_json(run_path(parts[2]))))
+            if len(parts) == 3 and parts[:2] == ["api", "runs"]:
+                if method == "GET":
+                    return self.send_json(200, read_json(run_path(parts[2])))
+                if method == "DELETE":
+                    run_id = parts[2]
+                    path = run_path(run_id)
+                    with RUN_LOCK:
+                        DELETED_RUNS.add(safe_id(run_id))
+                        if path.exists():
+                            path.unlink()
+                    return self.send_json(200, {"deleted": True})
             if method == "GET" and self.serve_frontend(parsed.path):
                 return
             return self.send_json(404, {"error": "Not found"})

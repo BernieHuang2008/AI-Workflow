@@ -357,26 +357,202 @@ def call_json_endpoint(endpoint: dict[str, Any], payload: dict[str, Any]) -> dic
     return json.loads(raw) if raw else {}
 
 
-def call_paddleocr_endpoint(endpoint: dict[str, Any], file_data: str) -> dict[str, Any]:
-    url = endpoint.get("url", "")
-    headers = endpoint_headers(endpoint, default_auth_scheme="token")
-    payload = {
-        "file": file_data,
-        "fileType": 1,
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useTextlineOrientation": False,
-        "useChartRecognition": False,
-    }
-    request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-    context = ssl._create_unverified_context()
+PADDLEOCR_JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+PADDLEOCR_DEFAULT_MODEL = "PP-OCRv6"
+PADDLEOCR_POLL_INTERVAL = 5
+PADDLEOCR_JOB_TIMEOUT = 2400
+PADDLEOCR_LEGACY_URL_HINTS = ("aistudio-app.com/layout-parsing", "layout-parsing")
+OCR_IMAGE_DIR = DATA_DIR / "ocr"
+DEFAULT_OCR_OPTIONAL_PAYLOAD = {
+    "useDocOrientationClassify": False,
+    "useDocUnwarping": False,
+    "useTextlineOrientation": False,
+}
+
+
+def as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def resolve_ocr_job_url(config: dict[str, Any], endpoint: dict[str, Any]) -> str:
+    """The job API lives on a fixed host; ignore the retired layout-parsing url."""
+    url = str(config.get("url") or endpoint.get("url") or "").strip()
+    if not url or any(hint in url for hint in PADDLEOCR_LEGACY_URL_HINTS):
+        return PADDLEOCR_JOB_URL
+    return url
+
+
+def ocr_job_headers(token: str, content_type: str | None = None) -> dict[str, str]:
+    headers = {"Authorization": f"bearer {token}"} if token else {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def encode_multipart(
+    fields: dict[str, str],
+    file_field: str,
+    filename: str,
+    file_bytes: bytes,
+    content_type: str = "application/octet-stream",
+) -> tuple[bytes, str]:
+    boundary = "----aiworkflow" + uuid.uuid4().hex
+    while boundary.encode("utf-8") in file_bytes:
+        boundary = "----aiworkflow" + uuid.uuid4().hex
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+        )
+    parts.append(
+        (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    parts.append(file_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def open_url_bytes(request: Request, timeout: int = 300, context: Any = None) -> bytes:
     try:
-        with urlopen(request, timeout=300, context=context) as response:
-            raw = response.read().decode("utf-8")
+        with urlopen(request, timeout=timeout, context=context) as response:
+            return response.read()
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise ValueError(f"OCR API request failed with status {exc.code}: {body}") from exc
-    return json.loads(raw) if raw else {}
+    except URLError as exc:
+        raise ValueError(f"OCR API request failed: {exc.reason}") from exc
+
+
+def submit_paddleocr_job(api_url: str, token: str, model: str, optional_payload: dict[str, Any], image: Any) -> str:
+    context = ssl._create_unverified_context()
+    filename, file_bytes, content_type = load_image_bytes(image)
+    fields = {"model": model, "optionalPayload": json.dumps(optional_payload)}
+    body, multipart_type = encode_multipart(fields, "file", filename, file_bytes, content_type)
+    request = Request(api_url, data=body, headers=ocr_job_headers(token, multipart_type), method="POST")
+    raw = open_url_bytes(request, timeout=300, context=context)
+    return parse_ocr_job_id(json.loads(raw.decode("utf-8")) if raw else {})
+
+
+def parse_ocr_job_id(response: Any) -> str:
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError(f"OCR API did not return job data: {response}")
+    job_id = data.get("jobId")
+    if not job_id:
+        raise ValueError(f"OCR API did not return a job id: {data}")
+    return str(job_id)
+
+
+def poll_paddleocr_job(api_url: str, token: str, job_id: str) -> str:
+    context = ssl._create_unverified_context()
+    job_url = f"{api_url.rstrip('/')}/{job_id}"
+    deadline = time.time() + PADDLEOCR_JOB_TIMEOUT
+    while True:
+        request = Request(job_url, headers=ocr_job_headers(token), method="GET")
+        raw = open_url_bytes(request, timeout=300, context=context)
+        data = (json.loads(raw.decode("utf-8")) if raw else {}).get("data") or {}
+        state = data.get("state")
+        if state == "done":
+            result_url = data.get("resultUrl") or {}
+            json_url = result_url.get("jsonUrl")
+            if not json_url:
+                raise ValueError("OCR job finished without a result url")
+            return str(json_url)
+        if state == "failed":
+            raise ValueError(f"OCR job failed: {data.get('errorMsg') or 'unknown error'}")
+        if state not in ("pending", "running"):
+            raise ValueError(f"OCR job returned an unknown state: {state}")
+        if time.time() >= deadline:
+            raise ValueError(f"OCR job {job_id} timed out after {PADDLEOCR_JOB_TIMEOUT}s (state: {state})")
+        time.sleep(PADDLEOCR_POLL_INTERVAL)
+
+
+def fetch_paddleocr_result_lines(json_url: str) -> list[dict[str, Any]]:
+    context = ssl._create_unverified_context()
+    raw = open_url_bytes(Request(json_url, method="GET"), timeout=300, context=context)
+    lines = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line:
+            lines.append(json.loads(line))
+    return lines
+
+
+def collect_ocr_texts(lines: list[dict[str, Any]]) -> list[str]:
+    texts: list[str] = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        result = line.get("result")
+        if not isinstance(result, dict):
+            continue
+        for item in result.get("ocrResults") or []:
+            if not isinstance(item, dict):
+                continue
+            pruned = item.get("prunedResult")
+            rec_texts = pruned.get("rec_texts") if isinstance(pruned, dict) else None
+            if isinstance(rec_texts, list) and rec_texts:
+                texts.append("\n".join(str(text) for text in rec_texts))
+    return texts
+
+
+def save_ocr_result_images(lines: list[dict[str, Any]], job_id: str) -> list[str]:
+    urls: list[str] = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        result = line.get("result")
+        if not isinstance(result, dict):
+            continue
+        for item in result.get("ocrResults") or []:
+            if isinstance(item, dict) and item.get("ocrImage"):
+                urls.append(str(item["ocrImage"]))
+    if not urls:
+        return []
+    context = ssl._create_unverified_context()
+    target_dir = OCR_IMAGE_DIR / job_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for index, url in enumerate(urls):
+        try:
+            content = open_url_bytes(Request(url, method="GET"), timeout=300, context=context)
+        except (ValueError, OSError):
+            continue
+        path = target_dir / f"img_output_{index}.jpg"
+        path.write_bytes(content)
+        saved.append(str(path))
+    return saved
+
+
+def run_paddleocr_job(config: dict[str, Any], endpoint: dict[str, Any], image: Any) -> dict[str, Any]:
+    api_url = resolve_ocr_job_url(config, endpoint)
+    token = str(config.get("apiKey") or endpoint.get("apiKey") or "")
+    model = str(config.get("model") or endpoint.get("model") or PADDLEOCR_DEFAULT_MODEL)
+    optional_payload = dict(DEFAULT_OCR_OPTIONAL_PAYLOAD)
+    configured_payload = config.get("optionalPayload")
+    if isinstance(configured_payload, dict):
+        optional_payload.update(configured_payload)
+    for key in list(optional_payload):
+        optional_payload[key] = as_bool(config.get(key, optional_payload[key]))
+    job_id = submit_paddleocr_job(api_url, token, model, optional_payload, image)
+    json_url = poll_paddleocr_job(api_url, token, job_id)
+    lines = fetch_paddleocr_result_lines(json_url)
+    job_info = {"jobId": job_id, "model": model, "jsonUrl": json_url}
+    return {
+        "job": job_info,
+        "lines": lines,
+        "texts": collect_ocr_texts(lines),
+        "images": save_ocr_result_images(lines, job_id),
+    }
 
 
 def extract_deepseek_text(response: Any) -> str | dict[str, Any]:
@@ -394,49 +570,107 @@ def extract_deepseek_text(response: Any) -> str | dict[str, Any]:
     return response
 
 
-def extract_paddleocr_texts(response: Any) -> tuple[list[str], Any]:
-    if isinstance(response, dict):
-        result = response.get("result")
-        if isinstance(result, dict):
-            texts = []
-            layout_results = result.get("layoutParsingResults")
-            if isinstance(layout_results, list):
-                for item in layout_results:
-                    if not isinstance(item, dict):
-                        continue
-                    markdown = item.get("markdown")
-                    if isinstance(markdown, dict):
-                        text = markdown.get("text")
-                        if text:
-                            texts.append(str(text))
-            return texts, result
-        return [], result
-    return [], response
+def load_image_bytes(image: Any) -> tuple[str, bytes, str]:
+    """Return (filename, bytes, content_type) for a node image input.
 
-
-def image_to_base64(image: Any) -> str | None:
+    Accepts a data URL, raw base64, a dict carrying one of those, or a readable
+    local path. The PaddleOCR job API needs bytes for its multipart upload.
+    """
     if isinstance(image, dict):
         for key in ("dataUrl", "dataURL", "base64", "file", "content"):
             value = image.get(key)
             if isinstance(value, str) and value:
-                image = value
-                break
-        else:
-            for key in ("path", "filePath"):
-                value = image.get(key)
-                if isinstance(value, str) and value:
-                    path = Path(value)
-                    if path.is_file():
-                        return base64.b64encode(path.read_bytes()).decode("ascii")
-            return None
+                return decode_image_value(value, str(image.get("name") or ""), allow_path=False)
+        for key in ("path", "filePath"):
+            value = image.get(key)
+            if isinstance(value, str) and value:
+                return read_image_path(value)
+        raise ValueError("OCR node received an image without file data")
     if isinstance(image, str):
-        if image.startswith("data:") and "," in image:
-            return image.split(",", 1)[1]
-        path = Path(image)
-        if path.is_file():
-            return base64.b64encode(path.read_bytes()).decode("ascii")
-        return image
-    return None
+        return decode_image_value(image, "")
+    raise ValueError("OCR node received an unsupported image value")
+
+
+def decode_image_value(value: Any, name: str = "", allow_path: bool = True) -> tuple[str, bytes, str]:
+    if value.startswith("http://") or value.startswith("https://"):
+        body = open_url_bytes(Request(value, method="GET"), timeout=300, context=ssl._create_unverified_context())
+        filename = name or Path(urlparse(value).path).name or "image.jpg"
+        return filename, body, guess_content_type(filename)
+    if value.startswith("data:"):
+        media_type, _, payload = value[5:].partition(",")
+        media_type = media_type.split(";", 1)[0].strip() or "image/jpeg"
+        if not name:
+            suffix = media_type.split("/", 1)[1] if "/" in media_type else "jpg"
+            name = f"image.{suffix}"
+        return name, decode_base64_image(payload), media_type
+    if allow_path and is_path_like(value):
+        return read_image_path(value)
+    try:
+        return name or "image.jpg", decode_base64_image(value), "image/jpeg"
+    except ValueError as exc:
+        if value.lower().endswith(IMAGE_SUFFIXES):
+            raise ValueError(f"OCR node image file not found: {value}") from exc
+        raise
+
+
+def is_path_like(value: str) -> bool:
+    """True only for strings that read as an image path, never for base64 blobs."""
+    if not value or len(value) > 4096 or "data:" in value:
+        return False
+    if any(char in value for char in "\n\r?#|<>*"):
+        return False
+    if not value.lower().endswith(IMAGE_SUFFIXES):
+        return False
+    if value.startswith(("data:", "http://", "https://")):
+        return False
+    for char in value:
+        if char in "/\\:":
+            return True
+    return Path(value).is_file()
+
+
+def decode_base64_image(payload: str) -> bytes:
+    try:
+        data = base64.b64decode(payload, validate=False)
+    except Exception as exc:
+        raise ValueError("OCR node received an image that is not valid base64") from exc
+    if not looks_like_image(data):
+        raise ValueError("OCR node received data that is not a PNG, JPEG, GIF, WebP, BMP or TIFF image")
+    return data
+
+
+IMAGE_MAGIC = (
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"\xff\xd8\xff",  # JPEG
+    b"GIF87a",  # GIF
+    b"GIF89a",  # GIF
+    b"BM",  # BMP
+    b"II*\x00",  # TIFF little endian
+    b"MM\x00*",  # TIFF big endian
+)
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")
+
+
+def looks_like_image(data: bytes) -> bool:
+    if len(data) < 12:
+        return False
+    if data.startswith(IMAGE_MAGIC):
+        return True
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+def read_image_path(value: str) -> tuple[str, bytes, str]:
+    path = Path(value)
+    if not path.is_file():
+        raise ValueError(f"OCR node image file not found: {value}")
+    data = path.read_bytes()
+    if not looks_like_image(data):
+        raise ValueError(f"OCR node image is not a supported image file: {value}")
+    return path.name, data, guess_content_type(path.name)
+
+
+def guess_content_type(name: str) -> str:
+    return mimetypes.guess_type(name)[0] or "image/jpeg"
 
 
 def resolve_ocr_images(inputs: dict[str, Any]) -> list[Any]:
@@ -464,24 +698,26 @@ def execute_input_node(node: dict[str, Any], run_inputs: dict[str, Any]) -> dict
 
 
 def execute_ocr_node(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-    endpoint = endpoint_by_id(node.get("config", {}).get("endpointId"), "ocr")
+    config = node.get("config", {})
+    endpoint = endpoint_by_id(config.get("endpointId"), "ocr")
     images = resolve_ocr_images(inputs)
     if endpoint and not endpoint.get("url", "").startswith("mock://"):
         ocr_texts = []
-        raw_results = []
+        jobs = []
+        image_paths: list[str] = []
         for image in images:
-            file_data = image_to_base64(image)
-            if not file_data:
-                raise ValueError("OCR node received an image without file data")
-            response = call_paddleocr_endpoint(endpoint, file_data)
-            texts, raw_result = extract_paddleocr_texts(response)
-            ocr_texts.append("\n\n".join(texts))
-            raw_results.append(raw_result)
+            job = run_paddleocr_job(config, endpoint, image)
+            ocr_texts.append("\n".join(job["texts"]))
+            jobs.append(job["job"])
+            image_paths.extend(job["images"])
         output: dict[str, Any] = {"ocrResultList": ocr_texts}
-        if ocr_texts:
-            output["textContent"] = "\n\n".join(text for text in ocr_texts if text)
-        if raw_results:
-            output["rawResult"] = raw_results[0] if len(raw_results) == 1 else raw_results
+        text_content = "\n\n".join(text for text in ocr_texts if text)
+        if text_content:
+            output["textContent"] = text_content
+        if jobs:
+            output["rawResult"] = jobs[0] if len(jobs) == 1 else jobs
+        if image_paths:
+            output["ocrImagePaths"] = image_paths
         return output
     results = []
     for index, image in enumerate(images):

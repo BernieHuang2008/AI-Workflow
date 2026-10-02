@@ -615,6 +615,49 @@ function Inspector({ node, catalog, onChange, onRemove, edges, onRemoveEdge }) {
           </select>
         </label>
       )}
+      {node.type === "ocr" && (
+        <>
+          <label>
+            Model
+            <input value={config.model || ""} onChange={(event) => patchConfig({ model: event.target.value })} placeholder="PP-OCRv6" />
+          </label>
+          <label>
+            Token override
+            <input
+              value={config.apiKey || ""}
+              onChange={(event) => patchConfig({ apiKey: event.target.value })}
+              placeholder="uses the endpoint token when empty"
+            />
+          </label>
+          <label className="checkboxRow">
+            <input
+              type="checkbox"
+              checked={Boolean(config.useDocOrientationClassify)}
+              onChange={(event) => patchConfig({ useDocOrientationClassify: event.target.checked })}
+            />
+            Document orientation classify
+          </label>
+          <label className="checkboxRow">
+            <input
+              type="checkbox"
+              checked={Boolean(config.useDocUnwarping)}
+              onChange={(event) => patchConfig({ useDocUnwarping: event.target.checked })}
+            />
+            Document unwarping
+          </label>
+          <label className="checkboxRow">
+            <input
+              type="checkbox"
+              checked={Boolean(config.useTextlineOrientation)}
+              onChange={(event) => patchConfig({ useTextlineOrientation: event.target.checked })}
+            />
+            Text line orientation
+          </label>
+          <div className="helperText">
+            Images are uploaded to the PaddleOCR job API, polled until the job is done, then the cropped result images are stored under <code>data/ocr/&lt;jobId&gt;/</code>.
+          </div>
+        </>
+      )}
       {node.type === "input" && <InputFieldsEditor fields={config.fields || []} onChange={(fields) => patchConfig({ fields })} />}
       {node.type === "llm" && (
         <>

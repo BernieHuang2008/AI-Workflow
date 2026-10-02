@@ -8,6 +8,7 @@ services:
     environment:
       AI_WORKFLOW_CONFIG: /app/config/config.json
       AI_WORKFLOW_DATA_DIR: /data/ai-workflow
+      AI_WORKFLOW_ALLOWED_HOST: ai-workflow.berniehg.top
     volumes:
       - ./config:/app/config:ro
-      - /data/ai-workflow:/data/ai-workflow
+      - ./data:/data/ai-workflow

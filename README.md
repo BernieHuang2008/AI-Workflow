@@ -68,7 +68,8 @@ The workflow tags the image as `latest` and with the current commit SHA.
       "type": "ocr",
       "provider": "paddleocr",
       "label": "PaddleOCR",
-      "url": "https://c8s16af3r0gd36g6.aistudio-app.com/layout-parsing",
+      "url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+      "model": "PP-OCRv6",
       "apiKey": "YOUR_PADDLEOCR_TOKEN"
     },
     {

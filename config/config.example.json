@@ -11,8 +11,9 @@
       "type": "ocr",
       "provider": "paddleocr",
       "label": "PaddleOCR",
-      "description": "PaddleOCR layout parsing endpoint.",
-      "url": "https://c8s16af3r0gd36g6.aistudio-app.com/layout-parsing",
+      "description": "PaddleOCR async job API (multipart upload, polled to completion).",
+      "url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+      "model": "PP-OCRv6",
       "apiKey": "YOUR_PADDLEOCR_TOKEN"
     },
     {
